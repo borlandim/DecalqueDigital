@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Decalque com Câmera</title>
+<style>
+:root{color-scheme:dark;--bg:#111;--panel:rgba(20,20,24,.88);--fg:#f2f2f2;--mut:#a0a0aa;--ac:#ffb454;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+#stage{position:absolute;inset:0;touch-action:none;overflow:hidden;background:#1b1b1f}
+#cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#ov{position:absolute;left:50%;top:50%;transform-origin:center;will-change:transform;pointer-events:none}
+#grid{position:absolute;inset:0;pointer-events:none;display:none;background-image:linear-gradient(rgba(255,255,255,.35) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.35) 1px,transparent 1px);background-size:33.333% 33.333%}
+#msg{position:absolute;left:12px;right:12px;top:calc(env(safe-area-inset-top,0px) + 12px);padding:10px 12px;background:var(--panel);border-radius:10px;font-size:14px;display:none}
+#panel{position:absolute;left:0;right:0;bottom:0;padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));background:var(--panel);backdrop-filter:blur(8px);border-radius:16px 16px 0 0;max-height:60%;overflow:auto;transition:transform .2s}
+#panel.hide{transform:translateY(100%)}
+#tg{position:absolute;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));width:44px;height:44px;border-radius:50%;border:0;background:var(--ac);color:#111;font-size:20px;display:none;z-index:5}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+button,select{font:inherit;font-size:14px;color:var(--fg);background:#2d2d34;border:1px solid #44444d;border-radius:10px;padding:9px 12px}
+button.p{background:var(--ac);color:#111;border-color:var(--ac);font-weight:600}
+button.on{outline:2px solid var(--ac)}
+label{display:block;font-size:12px;color:var(--mut);margin:6px 0 2px}
+label b{color:var(--fg);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--ac)}
+#thrw{display:none}
+.hint{font-size:12px;color:var(--mut);margin:6px 0 0}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="ov"></canvas>
+  <div id="grid"></div>
+  <div id="msg"></div>
+</div>
+<button id="tg" aria-label="Mostrar painel">☰</button>
+<div id="panel">
+  <div class="row">
+    <button class="p" id="bOpen">📁 Abrir foto</button>
+    <button id="bCam">📷 Câmera</button>
+    <button id="bSw">🔄 Trocar</button>
+    <button id="bHide">▼ Ocultar</button>
+  </div>
+  <input type="file" id="file" accept="image/*" hidden>
+  <label>Transparência da foto: <b id="vO">50%</b></label>
+  <input type="range" id="rO" min="5" max="100" value="50">
+  <label>Tamanho: <b id="vS">100%</b></label>
+  <input type="range" id="rS" min="5" max="500" value="100">
+  <label>Rotação: <b id="vR">0°</b></label>
+  <input type="range" id="rR" min="-180" max="180" value="0">
+  <div class="row" style="margin-top:10px">
+    <select id="mode">
+      <option value="orig">Foto original</option>
+      <option value="gray">Tons de cinza</option>
+      <option value="edge">Contornos (linhas)</option>
+    </select>
+    <button id="bFlip">↔ Espelhar</button>
+    <button id="bGrid">▦ Grade</button>
+    <button id="bLock">🔓 Travar</button>
+    <button id="bCenter">◎ Centralizar</button>
+    <button id="bFull">⛶ Tela cheia</button>
+  </div>
+  <div id="thrw">
+    <label>Sensibilidade dos contornos: <b id="vT">30</b></label>
+    <input type="range" id="rT" min="5" max="120" value="30">
+    <div class="row" style="margin-top:8px"><button id="bInv">Linhas: escuras</button></div>
+  </div>
+  <p class="hint">Arraste a foto com um dedo para mover; use dois dedos para ampliar e girar. Apoie o celular em um suporte fixo sobre o papel.</p>
+</div>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const stage=$('stage'),cam=$('cam'),ov=$('ov'),ctx=ov.getContext('2d'),msg=$('msg'),panel=$('panel'),tg=$('tg');
+  const src=document.createElement('canvas'),sctx=src.getContext('2d',{willReadFrequently:true});
+  let hasImg=false,st={x:0,y:0,s:1,r:0,flip:false,locked:false,op:.5},facing='environment',stream=null,invert=false,wake=null;
+
+  function say(t,keep){msg.textContent=t;msg.style.display=t?'block':'none';if(t&&!keep)setTimeout(()=>{if(msg.textContent===t)msg.style.display='none'},5000)}
+  msg.onclick=()=>{msg.style.display='none'};
+  const inFrame=(()=>{try{return window.self!==window.top}catch(e){return true}})();
+
+  function apply(){
+    ov.style.opacity=st.op;
+    ov.style.transform='translate(-50%,-50%) translate('+st.x+'px,'+st.y+'px) rotate('+st.r+'rad) scale('+(st.flip?-st.s:st.s)+','+st.s+')';
+    $('rS').value=Math.round(st.s*100);$('vS').textContent=Math.round(st.s*100)+'%';
+    let d=Math.round(st.r*180/Math.PI);d=((d+180)%360+360)%360-180;
+    $('rR').value=d;$('vR').textContent=d+'°';
+    $('rO').value=Math.round(st.op*100);$('vO').textContent=Math.round(st.op*100)+'%';
+  }
+
+  function render(){
+    if(!hasImg)return;
+    const w=src.width,h=src.height,mode=$('mode').value;
+    ov.width=w;ov.height=h;
+    const d=sctx.getImageData(0,0,w,h),p=d.data;
+    if(mode==='orig'){ctx.putImageData(d,0,0);return}
+    const g=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++)g[i]=.299*p[i*4]+.587*p[i*4+1]+.114*p[i*4+2];
+    const out=ctx.createImageData(w,h),o=out.data;
+    if(mode==='gray'){
+      for(let i=0;i<w*h;i++){const v=g[i];o[i*4]=o[i*4+1]=o[i*4+2]=v;o[i*4+3]=255}
+    }else{
+      const thr=+$('rT').value,c=invert?255:0;
+      for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
+        const i=y*w+x;
+        const gx=-g[i-w-1]-2*g[i-1]-g[i+w-1]+g[i-w+1]+2*g[i+1]+g[i+w+1];
+        const gy=-g[i-w-1]-2*g[i-w]-g[i-w+1]+g[i+w-1]+2*g[i+w]+g[i+w+1];
+        const m=Math.sqrt(gx*gx+gy*gy)/4;
+        const a=Math.max(0,Math.min(255,(m-thr*.35)*(255/Math.max(thr,1))*2));
+        o[i*4]=o[i*4+1]=o[i*4+2]=c;o[i*4+3]=a;
+      }
+    }
+    ctx.putImageData(out,0,0);
+  }
+
+  function center(){
+    if(!hasImg)return;
+    const r=stage.getBoundingClientRect();
+    st.x=0;st.y=0;st.r=0;
+    st.s=Math.min(r.width/src.width,r.height/src.height)*.9;
+    apply();
+  }
+
+  $('bOpen').onclick=()=>$('file').click();
+  $('file').onchange=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const url=URL.createObjectURL(f),im=new Image();
+    im.onload=()=>{
+      const k=Math.min(1,1200/Math.max(im.width,im.height));
+      src.width=Math.round(im.width*k);src.height=Math.round(im.height*k);
+      sctx.drawImage(im,0,0,src.width,src.height);
+      hasImg=true;URL.revokeObjectURL(url);render();center();
+      if(!stream)startCam();
+    };
+    im.onerror=()=>say('Não foi possível abrir esta imagem.');
+    im.src=url;e.target.value='';
+  };
+
+  async function startCam(){
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){say('Este navegador não permite acesso à câmera nesta página. Baixe o arquivo HTML e abra-o diretamente no navegador do dispositivo.');return}
+    stopCam();
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facing},width:{ideal:1920},height:{ideal:1080}},audio:false});
+      cam.srcObject=stream;await cam.play().catch(()=>{});
+      $('bCam').classList.add('on');
+      try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){}
+    }catch(e){
+      if(inFrame){say('A câmera está bloqueada porque esta página está dentro de outro site (moldura). Abra o arquivo HTML diretamente ou use a versão hospedada com HTTPS. Toque para fechar.',true)}
+      else if(e.name==='NotAllowedError'){say('Permissão da câmera negada. Toque no ícone de cadeado ou câmera ao lado do endereço, escolha Permitir e toque novamente em 📷 Câmera. Toque para fechar.',true)}
+      else if(e.name==='NotFoundError'){say('Nenhuma câmera foi encontrada neste aparelho.',true)}
+      else if(e.name==='NotReadableError'){say('A câmera está em uso por outro aplicativo. Feche-o e tente novamente.',true)}
+      else{say('Câmera indisponível ('+(e.name||'erro')+').',true)}
+    }
+  }
+  function stopCam(){
+    if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+    cam.srcObject=null;$('bCam').classList.remove('on');
+    if(wake){try{wake.release()}catch(e){}wake=null}
+  }
+  $('bCam').onclick=()=>stream?stopCam():startCam();
+  $('bSw').onclick=()=>{facing=facing==='environment'?'user':'environment';startCam()};
+
+  $('rO').oninput=e=>{st.op=e.target.value/100;apply()};
+  $('rS').oninput=e=>{st.s=e.target.value/100;apply()};
+  $('rR').oninput=e=>{st.r=e.target.value*Math.PI/180;apply()};
+  $('mode').onchange=e=>{$('thrw').style.display=e.target.value==='edge'?'block':'none';render()};
+  $('rT').oninput=e=>{$('vT').textContent=e.target.value;render()};
+  $('bInv').onclick=e=>{invert=!invert;e.target.textContent='Linhas: '+(invert?'claras':'escuras');render()};
+  $('bFlip').onclick=e=>{st.flip=!st.flip;e.target.classList.toggle('on',st.flip);apply()};
+  $('bGrid').onclick=e=>{const g=$('grid');const on=g.style.display!=='block';g.style.display=on?'block':'none';e.target.classList.toggle('on',on)};
+  $('bLock').onclick=e=>{st.locked=!st.locked;e.target.textContent=st.locked?'🔒 Travado':'🔓 Travar';e.target.classList.toggle('on',st.locked)};
+  $('bCenter').onclick=center;
+  $('bFull').onclick=()=>{try{document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}catch(e){say('Tela cheia indisponível.')}};
+  $('bHide').onclick=()=>{panel.classList.add('hide');tg.style.display='block'};
+  tg.onclick=()=>{panel.classList.remove('hide');tg.style.display='none'};
+
+  // Gestos: arrastar, pinça (zoom + rotação) e roda do mouse
+  const ptrs=new Map();
+  stage.addEventListener('pointerdown',e=>{ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});try{stage.setPointerCapture(e.pointerId)}catch(_){}});
+  stage.addEventListener('pointermove',e=>{
+    if(!ptrs.has(e.pointerId))return;
+    const prev=ptrs.get(e.pointerId),cur={x:e.clientX,y:e.clientY};
+    if(!hasImg||st.locked){ptrs.set(e.pointerId,cur);return}
+    if(ptrs.size===1){st.x+=cur.x-prev.x;st.y+=cur.y-prev.y}
+    else if(ptrs.size===2){
+      const other=[...ptrs.entries()].find(([id])=>id!==e.pointerId)[1];
+      const d0=Math.hypot(prev.x-other.x,prev.y-other.y),d1=Math.hypot(cur.x-other.x,cur.y-other.y);
+      const a0=Math.atan2(prev.y-other.y,prev.x-other.x),a1=Math.atan2(cur.y-other.y,cur.x-other.x);
+      if(d0>0)st.s=Math.max(.05,Math.min(5,st.s*d1/d0));
+      let da=a1-a0;if(da>Math.PI)da-=2*Math.PI;if(da<-Math.PI)da+=2*Math.PI;
+      st.r+=st.flip?-da:da;
+      st.x+=(cur.x-prev.x)/2;st.y+=(cur.y-prev.y)/2;
+    }
+    ptrs.set(e.pointerId,cur);apply();
+  });
+  const up=e=>ptrs.delete(e.pointerId);
+  stage.addEventListener('pointerup',up);stage.addEventListener('pointercancel',up);
+  stage.addEventListener('wheel',e=>{if(!hasImg||st.locked)return;e.preventDefault();st.s=Math.max(.05,Math.min(5,st.s*(e.deltaY<0?1.06:.94)));apply()},{passive:false});
+  document.addEventListener('visibilitychange',async()=>{if(!document.hidden&&stream&&navigator.wakeLock){try{wake=await navigator.wakeLock.request('screen')}catch(e){}}});
+
+  apply();
+  if(!window.isSecureContext&&location.protocol!=='file:'){say('Esta página precisa de HTTPS para usar a câmera.',true)}
+  else if(inFrame){say('Esta página está dentro de uma moldura e o navegador pode bloquear a câmera. Se falhar, abra o arquivo HTML diretamente ou use a versão hospedada.',true)}
+  else{say('Toque em 📷 Câmera para permitir o acesso e abra uma foto para o decalque.',true)}
+  if(navigator.permissions&&navigator.permissions.query){navigator.permissions.query({name:'camera'}).then(p=>{if(p.state==='denied'&&!inFrame)say('A câmera está bloqueada para este site. Libere nas configurações do navegador (cadeado ao lado do endereço) e recarregue a página.',true)}).catch(()=>{})}
+})();
+</script>
+</body>
+</html>
